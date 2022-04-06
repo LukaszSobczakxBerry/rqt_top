@@ -10,6 +10,6 @@ install(FILES plugin.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 
-catkin_install_python(PROGRAMS scripts/rqt_top
+catkin_install_python(PROGRAMS scripts/rqt_top scripts/top_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
