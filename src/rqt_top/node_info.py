@@ -63,7 +63,7 @@ class NodeInfo(object):
         infos = []
         self.remove_dead_nodes()
         for node_name in rosnode.get_node_names():
-            info = self.get_node_info(node_name)
+            info = self.get_node_info(node_name, skip_cache=True)
             if info is not False:
                 infos.append((node_name, info))
         return infos
@@ -122,6 +122,8 @@ class NodeInfo(object):
                 # the user explicitly asked for that particular attr
                 if attrs:
                     raise
+                continue
+            except Exception:
                 continue
             if name.startswith('get'):
                 if name[3] == '_':

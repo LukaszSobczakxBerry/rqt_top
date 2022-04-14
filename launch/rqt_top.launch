@@ -2,8 +2,9 @@
     <arg name="debug" default="0"/>
 
     <node name="top_node" pkg="rqt_top" type="top_node.py" output="screen" respawn="true">
-        <param name="update_interval" value="2" />
-        <param name="measure_rate" value="5" />
+        <param name="only_from_namespace" value="True" />
+        <param name="update_interval" value="10" />
+        <param name="measure_rate" value="1" />
         <param name="enable_measurements_per_process" value="True" />
         <param name="enable_overall_measurements" value="True" />
         <param name="debug" value="$(eval arg('debug') != 0)" />

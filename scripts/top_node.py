@@ -40,6 +40,7 @@ class TopNode():
 
     def __init__(self):
         self.debug = rospy.get_param('~debug', False)
+        self.only_from_namespace = rospy.get_param('~only_from_namespace', False)
         self.update_interval = rospy.get_param('~update_interval', 5)
         self.measure_rate = rospy.get_param('~measure_rate', 5)
         self.enable_measurements_per_process = rospy.get_param('~enable_measurements_per_process', True)
@@ -90,6 +91,8 @@ class TopNode():
 
     def store_node_info(self, node_info):
         if node_info['pid'] not in self.nodes:
+            if self.only_from_namespace and not node_info['node_name'].startswith(rospy.get_namespace()):
+                return
             node_stats = NodeStats(
                 node_name=node_info['node_name'],
                 pid=node_info['pid'],
@@ -111,7 +114,6 @@ class TopNode():
         r = rospy.Rate(self.measure_rate)
         while not rospy.is_shutdown():
             self.accumulate_stats()
-            self.remove_old_publishers()
             r.sleep()
 
     def get_average(self, measurements):
@@ -171,18 +173,14 @@ class TopNode():
 
     def get_publisher(self, topic):
         if topic not in self.stats_publishers:
-            self.stats_publishers[topic] = [rospy.Publisher(topic, Float64, queue_size=1, latch=True), rospy.Time.now()]
-        else:
-            self.stats_publishers[topic][1] = rospy.Time.now()
-        return self.stats_publishers[topic][0]
-    
-    def remove_old_publishers(self):
+            self.stats_publishers[topic] = rospy.Publisher(topic, Float64, queue_size=1)
+
+        return self.stats_publishers[topic]
+
+    def shutdown(self):
         for k in list(self.stats_publishers.keys()):
-            if rospy.Time.now() - self.stats_publishers[k][1] > rospy.Duration(2*self.update_interval):
-                if self.debug:
-                    rospy.loginfo("unregistering publisher on topic: {}".format(k))
-                self.stats_publishers[k][0].unregister()
-                del self.stats_publishers[k]
+            self.stats_publishers[k].unregister()
+            del self.stats_publishers[k]
 
 
 def main(args=None):
@@ -197,7 +195,7 @@ def main(args=None):
     except Exception as ex:
         rospy.logerr("Exception caught! Details: {}".format(ex))
     finally:
-        rospy.loginfo("Work is done, shutting down...")
+        top_node.shutdown()
 
 
 if __name__ == '__main__':
