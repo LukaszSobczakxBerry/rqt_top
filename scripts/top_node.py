@@ -1,8 +1,9 @@
 #!/usr/bin/python3
 
 import rospy
+import rosnode
 import threading
-from rqt_top.node_info import NodeInfo
+from rqt_top.nodes_processes_producer import NodesProcessesProducer
 from dataclasses import dataclass, field
 from typing import List
 from std_msgs.msg import Float64
@@ -17,8 +18,10 @@ jtop_available = importlib.find_loader('jtop') is not None
 if jtop_available:
     from jtop import jtop
 
+
 @dataclass
 class NodeStats():
+    """ dataclass with statistics per process """
     node_name: str = ""
     pid: int = 0
     cpu_usage: List[float] = field(default_factory=list)
@@ -33,10 +36,9 @@ class NodeStats():
         self.memory_usage.clear()
         self.gpu_memory_usage.clear()
 
+
 class TopNode():
     """ ROS node for publishing cpu/gpu/memory usage of each node on the machine/container """
-
-    NODE_FIELDS = ['pid', 'get_cpu_percent', 'get_cpu_num', 'get_memory_percent']
 
     def __init__(self):
         self.debug = rospy.get_param('~debug', False)
@@ -49,12 +51,26 @@ class TopNode():
         if not self.enable_measurements_per_process and not self.enable_overall_measurements:
             rospy.logwarn("all measurements disabled by parameters, no data will be provided")
 
-        self.node_info = NodeInfo()
-        self.nodes = dict()
-        self.stats_publishers = dict()
+        self.nodes_processes = NodesProcessesProducer()
+        self.nodes_stats = dict()
         self.overall_stats = NodeStats()
+        self.stats_publishers = dict()
+
+        # initialize GPU device object when dedicated GPU is present
         if nvml_available:
             self.gpu_device = Device(0)
+
+    def spin(self):
+        r = rospy.Rate(self.measure_rate)
+        last_update = rospy.Time(0)
+
+        while not rospy.is_shutdown():
+            self.accumulate_stats()
+            # count and publish stats if needed
+            if rospy.Time.now() - last_update > rospy.Duration.from_sec(self.update_interval):
+                self.produce_stats()
+                last_update = rospy.Time.now()
+            r.sleep()
 
     def accumulate_stats(self):
         if self.enable_measurements_per_process:
@@ -64,107 +80,97 @@ class TopNode():
             self.get_overall_stats()
 
     def get_stats_for_processes(self):
-        infos = self.node_info.get_all_node_fields(self.NODE_FIELDS)
-        for info in infos:
-            self.store_node_info(info['pid'], info)
+        # get ros nodes to measuring usage
+        if self.only_from_namespace:
+            all_nodes_names = rosnode.get_node_names(rospy.get_namespace())
+        else:
+            all_nodes_names = rosnode.get_node_names()
+
+        for node_name in all_nodes_names:
+            # for each node get its process
+            process = self.nodes_processes.get_node_process(node_name)
+            if process is not False:
+                # get statistics of the process
+                process_attr = process.as_dict(attrs=['cpu_num', 'cpu_percent', 'memory_percent'])
+                # create node stats if doesn't exist yet
+                if process.pid not in self.nodes_stats:
+                    self.nodes_stats[process.pid] = NodeStats(
+                            node_name=node_name,
+                            pid=process.pid,
+                            cores_number_usage=process_attr['cpu_num']
+                            )
+
+                # store cpu/memory percent usage for averaging value
+                self.nodes_stats[process.pid].cpu_usage.append(process_attr['cpu_percent'])
+                self.nodes_stats[process.pid].memory_usage.append(process_attr['memory_percent'])
+
+                # get gpu stats when dedicated GPU
+                if nvml_available:
+                    this_process = GpuProcess(process.pid, self.gpu_device)
+                    this_process.update_gpu_status()
+                    gpu_usage = this_process.gpu_sm_utilization()   # None when unavailable
+                    self.nodes_stats[process.pid].gpu_usage.append(gpu_usage if type(gpu_usage) == float else 0.0)
+                    gpu_mem = this_process.gpu_memory_percent()     # None when unavailable
+                    self.nodes_stats[process.pid].gpu_memory_usage.append(gpu_mem if type(gpu_mem) == float else 0.0)
 
     def get_overall_stats(self):
+        # store cpu/memory percent usage for averaging value, get number of logical CPUs
         self.overall_stats.cpu_usage.append(psutil.cpu_percent())
         self.overall_stats.cores_number_usage = psutil.cpu_count()
         mem = psutil.virtual_memory()
         self.overall_stats.memory_usage.append(mem.used/mem.total*100)
 
+        # get gpu stats when dedicated GPU
         if nvml_available:
-            gpu_usage = self.gpu_device.gpu_utilization()
+            gpu_usage = self.gpu_device.gpu_utilization()   # None when unavailable
             self.overall_stats.gpu_usage.append(gpu_usage if type(gpu_usage) == int else 0.0)
-            gpu_mem = self.gpu_device.memory_percent()
+            gpu_mem = self.gpu_device.memory_percent()      # None when unavailable
             self.overall_stats.gpu_memory_usage.append(gpu_mem if type(gpu_mem) == float else 0.0)
 
+        # get gpu stats when jetson
         if jtop_available:
             with jtop() as jetson:
                 self.overall_stats.gpu_usage.append(jetson.gpu['val'])
 
-    def store_node_info(self, node_pid, node_info):
-        if node_pid not in self.nodes:
-            if self.only_from_namespace and not node_info['node_name'].startswith(rospy.get_namespace()):
-                return
-            node_stats = NodeStats(
-                node_name=node_info['node_name'],
-                pid=node_pid,
-                cores_number_usage=node_info['cpu_num'])
-            self.nodes[node_stats.pid] = node_stats
+    def produce_stats(self):
+        if self.enable_measurements_per_process:
+            # measure average usage per each ROS node
+            for pid in self.nodes_stats:
+                # measure and publish usage statistics per process
+                node_stats = self.nodes_stats[pid]
+                self.measure_publish_stats(node_stats, node_stats.node_name + "/stats")
 
-        self.nodes[node_pid].cpu_usage.append(node_info['cpu_percent'])
-        self.nodes[node_pid].memory_usage.append(node_info['memory_percent'])
+                # clear data accumulated for measuring average values
+                self.nodes_stats[pid].clear()
 
-        if nvml_available:
-            this_process = GpuProcess(node_pid, self.gpu_device)
-            this_process.update_gpu_status()
-            gpu_usage = this_process.gpu_sm_utilization()
-            self.nodes[node_pid].gpu_usage.append(gpu_usage if type(gpu_usage) == float else 0.0)
-            gpu_mem = this_process.gpu_memory_percent()
-            self.nodes[node_pid].gpu_memory_usage.append(gpu_mem if type(gpu_mem) == float else 0.0)
+        if self.enable_overall_measurements:
+            # measure and publish overall usage statistics
+            self.measure_publish_stats(self.overall_stats, "stats")
+            # clear data accumulated for measuring average values
+            self.overall_stats = NodeStats()
 
-    def spin(self):
-        r = rospy.Rate(self.measure_rate)
-        last_update = rospy.Time(0)
-        while not rospy.is_shutdown():
-            self.accumulate_stats()
-            if rospy.Time.now() - last_update > rospy.Duration.from_sec(self.update_interval):
-                self.produce_stats()
-                last_update = rospy.Time.now()
-            r.sleep()
+    def measure_publish_stats(self, stats, topic_prefix):
+        # get avg values from arrays with measurements
+        avg_cpu_usage = self.get_average(stats.cpu_usage)
+        avg_memory_usage = self.get_average(stats.memory_usage)
+        avg_gpu_usage = self.get_average(stats.gpu_usage)
+        avg_gpu_memory_usage = self.get_average(stats.gpu_memory_usage)
+
+        # publish avg usage stats
+        self.publish(topic_prefix + "/cpu_usage", avg_cpu_usage)
+        self.publish(topic_prefix + "/memory_usage", avg_memory_usage)
+        self.publish(topic_prefix + "/gpu_usage", avg_gpu_usage)
+        self.publish(topic_prefix + "/gpu_memory_usage", avg_gpu_memory_usage)
+
+        if self.debug:
+            rospy.loginfo("{} ({}): cpu={:0.2f}%, cores={}, gpu={:0.2f}%, mem={:0.2f}%, gpu_mem={:0.2f}%".format(
+                stats.node_name, stats.pid, avg_cpu_usage, stats.cores_number_usage, avg_gpu_usage, avg_memory_usage, avg_gpu_memory_usage))
 
     def get_average(self, measurements):
         if len(measurements) > 0:
             return sum(measurements) / len(measurements)
         else:
             return -1    # -1 when usage statistic not available
-
-    def produce_stats(self):
-        if self.enable_measurements_per_process:
-            # measure average usage per each ROS node
-            for pid in self.nodes:
-                node_stats = self.nodes[pid]
-
-                # get avg values from arrays with measurements
-                avg_cpu_usage = self.get_average(node_stats.cpu_usage)
-                avg_memory_usage = self.get_average(node_stats.memory_usage)
-                avg_gpu_usage = self.get_average(node_stats.gpu_usage)
-                avg_gpu_memory_usage = self.get_average(node_stats.gpu_memory_usage)
-
-                # publish avg usage stats
-                self.publish(node_stats.node_name + "/stats/cpu_usage", avg_cpu_usage)
-                self.publish(node_stats.node_name + "/stats/memory_usage", avg_memory_usage)
-                self.publish(node_stats.node_name + "/stats/gpu_usage", avg_gpu_usage)
-                self.publish(node_stats.node_name + "/stats/gpu_memory_usage", avg_gpu_memory_usage)
-
-                if self.debug:
-                    rospy.loginfo("{} ({}): cpu={:0.2f}%, cores={}, gpu={:0.2f}%, mem={:0.2f}%, gpu_mem={:0.2f}%".format(
-                        node_stats.node_name, node_stats.pid, avg_cpu_usage, node_stats.cores_number_usage, avg_gpu_usage, avg_memory_usage, avg_gpu_memory_usage))
-
-                # clear data accumulated for measuring average values
-                self.nodes[pid].clear()
-
-        if self.enable_overall_measurements:
-            # get avg values from arrays with measurements
-            avg_cpu_usage = self.get_average(self.overall_stats.cpu_usage)
-            avg_memory_usage = self.get_average(self.overall_stats.memory_usage)
-            avg_gpu_usage = self.get_average(self.overall_stats.gpu_usage)
-            avg_gpu_memory_usage = self.get_average(self.overall_stats.gpu_memory_usage)
-
-            # publish avg usage stats
-            self.publish("stats/cpu_usage", avg_cpu_usage)
-            self.publish("stats/memory_usage", avg_memory_usage)
-            self.publish("stats/gpu_usage", avg_gpu_usage)
-            self.publish("stats/gpu_memory_usage", avg_gpu_memory_usage)
-
-            if self.debug:
-                rospy.loginfo("overall usage: cpu={:0.2f}%, cores={}, gpu={:0.2f}%, memory={:0.2f}%, gpu_mem=%{:0.2f}".format(
-                    avg_cpu_usage, self.overall_stats.cores_number_usage, avg_gpu_usage, avg_memory_usage, avg_gpu_memory_usage))
-
-            # clear data accumulated for measuring average values
-            self.overall_stats = NodeStats()
 
     def publish(self, topic, value):
         self.get_publisher(topic).publish(value)
@@ -189,9 +195,9 @@ def main(args=None):
     try:
         top_node.spin()
     except rospy.ROSInterruptException:
-        rospy.loginfo("Keyboard interrupt detected!")
+        pass
     except Exception as ex:
-        rospy.logerr("Exception caught! Details: {}".format(ex))
+        rospy.logerr("Top node caught an exception! Details: {}".format(ex))
     finally:
         top_node.shutdown()
 
