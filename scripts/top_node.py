@@ -47,6 +47,10 @@ class TopNode():
         self.measure_rate = rospy.get_param('~measure_rate', 5)
         self.enable_measurements_per_process = rospy.get_param('~enable_measurements_per_process', True)
         self.enable_overall_measurements = rospy.get_param('~enable_overall_measurements', True)
+        self.enable_gpu_measurements = rospy.get_param('~enable_gpu_measurements', True)
+        global nvml_available, jtop_available
+        nvml_available = self.enable_gpu_measurements & nvml_available
+        jtop_available = self.enable_gpu_measurements & jtop_available
         
         if not self.enable_measurements_per_process and not self.enable_overall_measurements:
             rospy.logwarn("all measurements disabled by parameters, no data will be provided")
