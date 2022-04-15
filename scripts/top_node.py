@@ -181,7 +181,7 @@ class TopNode():
 
     def get_publisher(self, topic):
         if topic not in self.stats_publishers:
-            self.stats_publishers[topic] = rospy.Publisher(topic, Float64, queue_size=1)
+            self.stats_publishers[topic] = rospy.Publisher(topic, Float64, queue_size=1, latch=True)
 
         return self.stats_publishers[topic]
 
