@@ -172,8 +172,9 @@ class TopNode():
         # publish avg usage stats
         self.publish(topic_prefix + "/cpu_usage", avg_cpu_usage)
         self.publish(topic_prefix + "/memory_usage", avg_memory_usage)
-        self.publish(topic_prefix + "/gpu_usage", avg_gpu_usage)
-        self.publish(topic_prefix + "/gpu_memory_usage", avg_gpu_memory_usage)
+        if self.enable_gpu_measurements:
+            self.publish(topic_prefix + "/gpu_usage", avg_gpu_usage)
+            self.publish(topic_prefix + "/gpu_memory_usage", avg_gpu_memory_usage)
 
         if self.debug:
             rospy.loginfo("{} ({}): cpu={:0.2f}%, cores={}, gpu={:0.2f}%, mem={:0.2f}%, gpu_mem={:0.2f}%".format(
