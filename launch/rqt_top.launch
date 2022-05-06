@@ -4,10 +4,11 @@
     <node name="top_node" pkg="rqt_top" type="top_node.py" output="screen" respawn="true">
         <param name="only_from_namespace" value="True" />
         <param name="update_interval" value="20" />
-        <param name="measure_rate" value="2" />
+        <param name="measure_rate" value="2" /> <!-- unused when enable_averaging == False -->
         <param name="enable_measurements_per_process" value="True" />
         <param name="enable_overall_measurements" value="True" />
         <param name="enable_gpu_measurements" value="False" />
+        <param name="enable_averaging" value="False" />
         <param name="debug" value="$(eval arg('debug') != 0)" />
     </node>
 </launch>

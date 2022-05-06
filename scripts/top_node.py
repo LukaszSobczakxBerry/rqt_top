@@ -48,10 +48,11 @@ class TopNode():
         self.enable_measurements_per_process = rospy.get_param('~enable_measurements_per_process', True)
         self.enable_overall_measurements = rospy.get_param('~enable_overall_measurements', True)
         self.enable_gpu_measurements = rospy.get_param('~enable_gpu_measurements', True)
+        self.enable_averaging = rospy.get_param('~enable_averaging', True)
         global nvml_available, jtop_available
         nvml_available = self.enable_gpu_measurements & nvml_available
         jtop_available = self.enable_gpu_measurements & jtop_available
-        
+
         if not self.enable_measurements_per_process and not self.enable_overall_measurements:
             rospy.logwarn("all measurements disabled by parameters, no data will be provided")
 
@@ -65,16 +66,24 @@ class TopNode():
             self.gpu_device = Device(0)
 
     def spin(self):
-        r = rospy.Rate(self.measure_rate)
-        last_update = rospy.Time(0)
+        if self.enable_averaging:
+            r = rospy.Rate(self.measure_rate)
+            last_update = rospy.Time(0)
 
-        while not rospy.is_shutdown():
-            self.accumulate_stats()
-            # count and publish stats if needed
-            if rospy.Time.now() - last_update > rospy.Duration.from_sec(self.update_interval):
+            while not rospy.is_shutdown():
+                self.accumulate_stats()
+                # count and publish stats if needed
+                if rospy.Time.now() - last_update > rospy.Duration.from_sec(self.update_interval):
+                    self.produce_stats()
+                    last_update = rospy.Time.now()
+                r.sleep()
+        else:
+            r = rospy.Rate(1.0/self.update_interval)
+            while not rospy.is_shutdown():
+                # measure usage and publish data immediately
+                self.accumulate_stats()
                 self.produce_stats()
-                last_update = rospy.Time.now()
-            r.sleep()
+                r.sleep()
 
     def accumulate_stats(self):
         if self.enable_measurements_per_process:
@@ -151,7 +160,7 @@ class TopNode():
             # measure and publish overall usage statistics
             self.measure_publish_stats(self.overall_stats, "stats")
             # clear data accumulated for measuring average values
-            self.overall_stats = NodeStats()
+            self.overall_stats.clear()
 
     def measure_publish_stats(self, stats, topic_prefix):
         # get avg values from arrays with measurements
